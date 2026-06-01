@@ -1,23 +1,22 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
-from app.config import get_settings
-
-settings = get_settings()
-
-# Railway sometimes gives postgres://; SQLAlchemy prefers postgresql://
-database_url = settings.database_url
-if database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql://", 1)
-
-connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-engine = create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+from datetime import datetime
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from app.database import Base
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+class BinanceAPIKey(Base):
+    __tablename__ = "binance_api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    api_key_encrypted = Column(Text, nullable=False)
+    secret_key_encrypted = Column(Text, nullable=False)
+    is_testnet = Column(Boolean, default=True, nullable=False)
+    enable_reading = Column(Boolean, default=False, nullable=False)
+    enable_trading = Column(Boolean, default=False, nullable=False)
+    enable_withdrawals = Column(Boolean, default=False, nullable=False)
+    enable_internal_transfer = Column(Boolean, default=False, nullable=False)
+    ip_restrict = Column(Boolean, default=False, nullable=False)
+    status = Column(String(50), default="unchecked", nullable=False)
+    last_checked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

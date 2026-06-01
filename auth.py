@@ -1,14 +1,16 @@
-from sqlalchemy.orm import Session
-from app.models.bot import Bot, BotRuntimeState
-from app.services.risk_manager import RiskDecision, check_basic_risk
-from app.services.trade_logger import log_safety_event
+from datetime import datetime
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
+from app.database import Base
 
 
-def enforce_safety_lock(db: Session, bot: Bot, state: BotRuntimeState, available_usdt: float, api_permission: dict) -> RiskDecision:
-    decision = check_basic_risk(bot, state, available_usdt, api_permission)
-    if not decision.ok:
-        state.safety_lock_status = decision.event_type
-        db.add(state)
-        db.commit()
-        log_safety_event(db, decision.event_type, decision.reason, "Blocked new trade", bot.id)
-    return decision
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(50), default="admin", nullable=False)
+    status = Column(String(50), default="active", nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

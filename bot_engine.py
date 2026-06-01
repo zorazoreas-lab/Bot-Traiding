@@ -1,47 +1,36 @@
-from datetime import datetime, timedelta
-from typing import Optional
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from app.config import get_settings
 from app.database import get_db
+from app.models.order import Order
+from app.models.trade_log import TradeLog
+from app.models.safety_event import SafetyEvent
 from app.models.user import User
+from app.schemas import ApiResponse
+from app.utils.security import get_current_user
 
-settings = get_settings()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+router = APIRouter(prefix="/api/trades", tags=["trades"])
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+@router.get("/orders", response_model=ApiResponse)
+def orders(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = db.query(Order).order_by(Order.id.desc()).limit(100).all()
+    data = [{
+        "id": r.id, "bot_id": r.bot_id, "symbol": r.symbol, "side": r.side,
+        "price": r.price, "quantity": r.quantity, "quote_order_qty": r.quote_order_qty,
+        "status": r.status, "created_at": r.created_at.isoformat()
+    } for r in rows]
+    return ApiResponse(ok=True, message="Orders loaded", data=data)
 
 
-def create_access_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
-    to_encode = {"sub": subject, "exp": expire}
-    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+@router.get("/logs", response_model=ApiResponse)
+def logs(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = db.query(TradeLog).order_by(TradeLog.id.desc()).limit(100).all()
+    data = [{"id": r.id, "bot_id": r.bot_id, "level": r.level, "message": r.message, "data_json": r.data_json, "created_at": r.created_at.isoformat()} for r in rows]
+    return ApiResponse(ok=True, message="Logs loaded", data=data)
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    user = db.query(User).filter(User.email == email, User.is_active == True).first()
-    if user is None:
-        raise credentials_exception
-    return user
+@router.get("/safety-events", response_model=ApiResponse)
+def safety_events(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = db.query(SafetyEvent).order_by(SafetyEvent.id.desc()).limit(100).all()
+    data = [{"id": r.id, "bot_id": r.bot_id, "event_type": r.event_type, "reason": r.reason, "action_taken": r.action_taken, "created_at": r.created_at.isoformat()} for r in rows]
+    return ApiResponse(ok=True, message="Safety events loaded", data=data)
