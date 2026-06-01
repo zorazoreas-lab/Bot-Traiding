@@ -1,0 +1,26 @@
+import base64
+import hashlib
+from cryptography.fernet import Fernet
+from app.config import get_settings
+
+settings = get_settings()
+
+
+def _get_fernet() -> Fernet:
+    key = settings.encryption_key.encode()
+    # If a real Fernet key is not supplied, derive a stable development key.
+    # In production, always set ENCRYPTION_KEY using Fernet.generate_key().
+    try:
+        return Fernet(key)
+    except Exception:
+        digest = hashlib.sha256(key).digest()
+        dev_key = base64.urlsafe_b64encode(digest)
+        return Fernet(dev_key)
+
+
+def encrypt_text(value: str) -> str:
+    return _get_fernet().encrypt(value.encode()).decode()
+
+
+def decrypt_text(value: str) -> str:
+    return _get_fernet().decrypt(value.encode()).decode()
