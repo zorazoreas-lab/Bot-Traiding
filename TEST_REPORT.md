@@ -81,3 +81,9 @@ BINANCE_USE_TESTNET=true
 ENABLE_LIVE_TRADING=false
 PAPER_TRADING=true
 ```
+
+## v4 Railway Nixpacks Build Fix
+- Removed active Dockerfile to avoid Dockerfile parser error.
+- Forced Railway builder to NIXPACKS in railway.json.
+- Kept Procfile as `web: python start.py`.
+- Confirmed project compiles without syntax errors.
