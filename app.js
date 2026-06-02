@@ -1,56 +1,26 @@
-from typing import Any
+import base64
+import hashlib
+from cryptography.fernet import Fernet
+from app.config import get_settings
+
+settings = get_settings()
 
 
-def _float(v: Any) -> float:
+def _get_fernet() -> Fernet:
+    key = settings.encryption_key.encode()
+    # If a real Fernet key is not supplied, derive a stable development key.
+    # In production, always set ENCRYPTION_KEY using Fernet.generate_key().
     try:
-        return float(v)
+        return Fernet(key)
     except Exception:
-        return 0.0
+        digest = hashlib.sha256(key).digest()
+        dev_key = base64.urlsafe_b64encode(digest)
+        return Fernet(dev_key)
 
 
-def simple_sma(values: list[float], period: int) -> float:
-    if len(values) < period:
-        return sum(values) / max(len(values), 1)
-    return sum(values[-period:]) / period
+def encrypt_text(value: str) -> str:
+    return _get_fernet().encrypt(value.encode()).decode()
 
 
-def check_trend_breakout_signal(klines: list) -> dict:
-    """A conservative starter signal for Auto Aggressive mode.
-
-    Expected kline format from Binance:
-    [open_time, open, high, low, close, volume, close_time, ...]
-    """
-    if len(klines) < 20:
-        return {"buy": False, "reason": "Not enough candles"}
-
-    closes = [_float(k[4]) for k in klines]
-    volumes = [_float(k[5]) for k in klines]
-    current = closes[-1]
-    sma_7 = simple_sma(closes, 7)
-    sma_20 = simple_sma(closes, 20)
-    recent_high = max(closes[-10:-1])
-    avg_volume = simple_sma(volumes, 20)
-    current_volume = volumes[-1]
-
-    buy = current > sma_7 > sma_20 and current >= recent_high and current_volume >= avg_volume
-    reason = "Trend breakout confirmed" if buy else "No breakout confirmation"
-    return {
-        "buy": buy,
-        "reason": reason,
-        "current": current,
-        "sma_7": sma_7,
-        "sma_20": sma_20,
-        "recent_high": recent_high,
-        "current_volume": current_volume,
-        "avg_volume": avg_volume,
-    }
-
-
-def check_volatility(klines: list) -> float:
-    if len(klines) < 2:
-        return 0.0
-    open_price = _float(klines[-1][1])
-    close_price = _float(klines[-1][4])
-    if open_price <= 0:
-        return 0.0
-    return abs(close_price - open_price) / open_price * 100.0
+def decrypt_text(value: str) -> str:
+    return _get_fernet().decrypt(value.encode()).decode()

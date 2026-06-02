@@ -1,62 +1,126 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, Any
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.database import get_db
+from app.models.user import User
+from app.models.binance_key import BinanceAPIKey
+from app.schemas import BinanceConnectRequest, ApiResponse
+from app.utils.security import get_current_user
+from app.services.encryption_service import encrypt_text
+from app.services.binance_service import BinanceService, BinanceAPIError
+from app.services.binance_credentials import (
+    get_binance_credentials,
+    latest_binance_key_row,
+    update_db_permission_snapshot,
+)
+
+router = APIRouter(prefix="/api/binance", tags=["binance"])
+settings = get_settings()
 
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+@router.post("/connect", response_model=ApiResponse)
+async def connect_binance(
+    payload: BinanceConnectRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Save API key in DB after validating it against Binance.
+
+    This route remains available even if BINANCE_API_KEY_SOURCE=env is used.
+    """
+    client = BinanceService(payload.api_key, payload.secret_key, payload.is_testnet)
+    try:
+        await client.account()
+        restrictions = await client.api_restrictions()
+    except BinanceAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    row = BinanceAPIKey(
+        user_id=user.id,
+        api_key_encrypted=encrypt_text(payload.api_key),
+        secret_key_encrypted=encrypt_text(payload.secret_key),
+        is_testnet=payload.is_testnet,
+        enable_reading=bool(restrictions.get("enableReading", True)),
+        enable_trading=bool(restrictions.get("enableSpotAndMarginTrading", True)),
+        enable_withdrawals=bool(restrictions.get("enableWithdrawals", False)),
+        enable_internal_transfer=bool(restrictions.get("enableInternalTransfer", False)),
+        ip_restrict=bool(restrictions.get("ipRestrict", False)),
+        status="unsafe" if restrictions.get("enableWithdrawals") else "connected",
+        last_checked_at=datetime.utcnow(),
+    )
+    db.add(row)
+    db.commit()
+    return ApiResponse(
+        ok=True,
+        message="Binance API connected",
+        data={"source": "database", "status": row.status, "permissions": restrictions},
+    )
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+@router.get("/source", response_model=ApiResponse)
+def credential_source(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = latest_binance_key_row(db, user.id)
+    env_available = bool(settings.binance_api_key and settings.binance_secret_key)
+    active_source = "env" if settings.binance_api_key_source.lower() == "env" and env_available else "database"
+    return ApiResponse(
+        ok=True,
+        message="Credential source loaded",
+        data={
+            "configured_source": settings.binance_api_key_source,
+            "active_source": active_source,
+            "env_key_available": env_available,
+            "database_key_available": bool(row),
+            "testnet": settings.binance_use_testnet if active_source == "env" else (row.is_testnet if row else None),
+        },
+    )
 
 
-class BinanceConnectRequest(BaseModel):
-    api_key: str = Field(min_length=5)
-    secret_key: str = Field(min_length=5)
-    is_testnet: bool = True
+@router.get("/permission-check", response_model=ApiResponse)
+async def permission_check(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    bundle = get_binance_credentials(db, user.id)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="No Binance API key found in ENV or database")
+    try:
+        await bundle.client.account()
+        restrictions = await bundle.client.api_restrictions()
+    except BinanceAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if bundle.row:
+        update_db_permission_snapshot(db, bundle.row, restrictions)
+
+    return ApiResponse(ok=True, message="Permission checked", data={"source": bundle.source, "permissions": restrictions})
 
 
-class BotCreateRequest(BaseModel):
-    bot_name: str = Field(min_length=2, max_length=120)
-    symbol: str = "BTCUSDT"
-    strategy_type: str = "TREND_BREAKOUT"
-    paper_trading: bool = True
-    max_usable_percent: float = 50
-    stop_loss_percent: float = 3
-    take_profit_percent: float = 5
-    daily_loss_limit_percent: float = 5
-    max_trade_per_day: int = 3
-    cooldown_minutes: int = 360
+@router.get("/balance", response_model=ApiResponse)
+async def balance(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    bundle = get_binance_credentials(db, user.id)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="No Binance API key found in ENV or database")
+    try:
+        account = await bundle.client.account()
+    except BinanceAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    non_zero = [
+        b for b in account.get("balances", [])
+        if float(b.get("free", 0)) > 0 or float(b.get("locked", 0)) > 0
+    ]
+    return ApiResponse(ok=True, message="Balance loaded", data={"source": bundle.source, "balances": non_zero})
 
 
-class BotUpdateStatusRequest(BaseModel):
-    status: str
-
-
-class BotOut(BaseModel):
-    id: int
-    bot_name: str
-    symbol: str
-    strategy_type: str
-    mode: str
-    status: str
-    paper_trading: bool
-    max_usable_percent: float
-    reserve_percent: float
-    stop_loss_percent: float
-    take_profit_percent: float
-    daily_loss_limit_percent: float
-    max_trade_per_day: int
-    cooldown_minutes: int
-    emergency_stop: bool
-
-    class Config:
-        from_attributes = True
-
-
-class ApiResponse(BaseModel):
-    ok: bool
-    message: str
-    data: Optional[Any] = None
+@router.get("/price/{symbol}", response_model=ApiResponse)
+async def price(symbol: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    bundle = get_binance_credentials(db, user.id)
+    if bundle:
+        client = bundle.client
+        source = bundle.source
+    else:
+        client = BinanceService("", "", settings.binance_use_testnet)
+        source = "public"
+    try:
+        data = await client.ticker_price(symbol.upper())
+    except BinanceAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ApiResponse(ok=True, message="Price loaded", data={"source": source, "ticker": data})

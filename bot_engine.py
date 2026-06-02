@@ -1,36 +1,25 @@
-from fastapi import APIRouter, Depends
+from datetime import timedelta
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.order import Order
-from app.models.trade_log import TradeLog
-from app.models.safety_event import SafetyEvent
 from app.models.user import User
-from app.schemas import ApiResponse
-from app.utils.security import get_current_user
+from app.schemas import LoginRequest, TokenResponse
+from app.utils.security import create_access_token, get_current_user, verify_password
+from app.config import get_settings
 
-router = APIRouter(prefix="/api/trades", tags=["trades"])
-
-
-@router.get("/orders", response_model=ApiResponse)
-def orders(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    rows = db.query(Order).order_by(Order.id.desc()).limit(100).all()
-    data = [{
-        "id": r.id, "bot_id": r.bot_id, "symbol": r.symbol, "side": r.side,
-        "price": r.price, "quantity": r.quantity, "quote_order_qty": r.quote_order_qty,
-        "status": r.status, "created_at": r.created_at.isoformat()
-    } for r in rows]
-    return ApiResponse(ok=True, message="Orders loaded", data=data)
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+settings = get_settings()
 
 
-@router.get("/logs", response_model=ApiResponse)
-def logs(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    rows = db.query(TradeLog).order_by(TradeLog.id.desc()).limit(100).all()
-    data = [{"id": r.id, "bot_id": r.bot_id, "level": r.level, "message": r.message, "data_json": r.data_json, "created_at": r.created_at.isoformat()} for r in rows]
-    return ApiResponse(ok=True, message="Logs loaded", data=data)
+@router.post("/login", response_model=TokenResponse)
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email, User.is_active == True).first()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_access_token(user.email, timedelta(minutes=settings.access_token_expire_minutes))
+    return TokenResponse(access_token=token)
 
 
-@router.get("/safety-events", response_model=ApiResponse)
-def safety_events(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    rows = db.query(SafetyEvent).order_by(SafetyEvent.id.desc()).limit(100).all()
-    data = [{"id": r.id, "bot_id": r.bot_id, "event_type": r.event_type, "reason": r.reason, "action_taken": r.action_taken, "created_at": r.created_at.isoformat()} for r in rows]
-    return ApiResponse(ok=True, message="Safety events loaded", data=data)
+@router.get("/me")
+def me(user: User = Depends(get_current_user)):
+    return {"id": user.id, "email": user.email, "role": user.role, "status": user.status}

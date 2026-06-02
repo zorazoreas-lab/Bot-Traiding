@@ -1,62 +1,99 @@
-from datetime import datetime
+import hashlib
+import hmac
+import time
+from typing import Any, Dict, Optional
+from urllib.parse import urlencode
+
+import httpx
 from app.config import get_settings
-from app.models.bot import Bot, BotRuntimeState
 
 settings = get_settings()
 
 
-class RiskDecision:
-    def __init__(self, ok: bool, reason: str, event_type: str = "OK"):
-        self.ok = ok
-        self.reason = reason
-        self.event_type = event_type
+class BinanceAPIError(Exception):
+    pass
 
 
-def calculate_usable_amount(total_usdt: float, max_usable_percent: float) -> float:
-    percent = min(max_usable_percent, settings.max_allowed_usable_percent)
-    return max(total_usdt * percent / 100.0, 0.0)
+class BinanceService:
+    def __init__(self, api_key: str, secret_key: str, is_testnet: bool = True):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.base_url = settings.normalized_binance_testnet_base_url if is_testnet else settings.normalized_binance_live_base_url
 
+    def _headers(self) -> Dict[str, str]:
+        return {"X-MBX-APIKEY": self.api_key}
 
-def check_basic_risk(bot: Bot, state: BotRuntimeState, available_usdt: float, api_permission: dict) -> RiskDecision:
-    if api_permission.get("enableWithdrawals") is True:
-        return RiskDecision(False, "Withdrawal permission is enabled", "WITHDRAWAL_PERMISSION_BLOCKED")
+    def _signed_params(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = dict(params or {})
+        payload["timestamp"] = int(time.time() * 1000)
+        payload.setdefault("recvWindow", 5000)
+        # Binance change notice: percent-encode payload before computing HMAC signature.
+        query_string = urlencode(payload, doseq=True)
+        signature = hmac.new(self.secret_key.encode(), query_string.encode(), hashlib.sha256).hexdigest()
+        payload["signature"] = signature
+        return payload
 
-    trading_enabled = api_permission.get("enableSpotAndMarginTrading") or api_permission.get("enableTrading")
-    if trading_enabled is False:
-        return RiskDecision(False, "Trading permission is disabled", "TRADING_PERMISSION_BLOCKED")
+    async def _request(self, method: str, path: str, signed: bool = False, params: Optional[Dict[str, Any]] = None) -> Any:
+        request_params = self._signed_params(params) if signed else (params or {})
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.request(method, f"{self.base_url}{path}", headers=self._headers(), params=request_params)
+        if response.status_code >= 400:
+            raise BinanceAPIError(f"Binance API error {response.status_code}: {response.text}")
+        return response.json()
 
-    if bot.max_usable_percent > settings.max_allowed_usable_percent:
-        return RiskDecision(False, f"Max usable percent cannot exceed {settings.max_allowed_usable_percent}%", "MAX_USABLE_PERCENT_BLOCK")
+    async def ping(self) -> Dict[str, Any]:
+        return await self._request("GET", "/api/v3/ping")
 
-    if bot.stop_loss_percent <= 0:
-        return RiskDecision(False, "Stop loss is required", "STOP_LOSS_REQUIRED")
+    async def account(self) -> Dict[str, Any]:
+        return await self._request("GET", "/api/v3/account", signed=True)
 
-    if bot.take_profit_percent <= 0:
-        return RiskDecision(False, "Take profit is required", "TAKE_PROFIT_REQUIRED")
+    async def api_restrictions(self) -> Dict[str, Any]:
+        # SAPI restrictions endpoint exists on production Binance. Testnet may not support it.
+        if "testnet" in self.base_url:
+            return {
+                "enableReading": True,
+                "enableSpotAndMarginTrading": True,
+                "enableWithdrawals": False,
+                "enableInternalTransfer": False,
+                "ipRestrict": False,
+                "note": "Testnet mode: restrictions endpoint may be unavailable, using safe simulated permissions after account validation."
+            }
+        return await self._request("GET", "/sapi/v1/account/apiRestrictions", signed=True)
 
-    if bot.emergency_stop:
-        return RiskDecision(False, "Emergency stop is active", "EMERGENCY_STOP")
+    async def ticker_price(self, symbol: str) -> Dict[str, Any]:
+        return await self._request("GET", "/api/v3/ticker/price", params={"symbol": symbol.upper()})
 
-    if state.cooldown_until and datetime.utcnow() < state.cooldown_until:
-        return RiskDecision(False, f"Bot is in cooldown until {state.cooldown_until}", "COOLDOWN_ACTIVE")
+    async def avg_price(self, symbol: str) -> Dict[str, Any]:
+        return await self._request("GET", "/api/v3/avgPrice", params={"symbol": symbol.upper()})
 
-    capital_basis = max(available_usdt, state.used_capital, 1.0)
-    daily_loss_percent = abs(min(state.today_pnl, 0.0)) / capital_basis * 100.0
-    if daily_loss_percent >= bot.daily_loss_limit_percent:
-        return RiskDecision(False, "Daily loss limit reached", "DAILY_LOSS_LIMIT_HIT")
+    async def klines(self, symbol: str, interval: str = "5m", limit: int = 30) -> Any:
+        return await self._request("GET", "/api/v3/klines", params={"symbol": symbol.upper(), "interval": interval, "limit": limit})
 
-    if state.today_trade_count >= bot.max_trade_per_day:
-        return RiskDecision(False, "Max trades per day reached", "MAX_TRADE_PER_DAY_HIT")
+    async def place_market_buy_quote(self, symbol: str, quote_order_qty: float) -> Dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/v3/order",
+            signed=True,
+            params={
+                "symbol": symbol.upper(),
+                "side": "BUY",
+                "type": "MARKET",
+                "quoteOrderQty": f"{quote_order_qty:.8f}",
+            },
+        )
 
-    reserve_required = available_usdt * bot.reserve_percent / 100.0
-    usable = calculate_usable_amount(available_usdt, bot.max_usable_percent)
-    if available_usdt - usable < reserve_required - 0.000001:
-        return RiskDecision(False, "Reserve balance protection triggered", "RESERVE_BALANCE_PROTECTION")
+    async def place_market_sell_qty(self, symbol: str, quantity: float) -> Dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/v3/order",
+            signed=True,
+            params={
+                "symbol": symbol.upper(),
+                "side": "SELL",
+                "type": "MARKET",
+                "quantity": f"{quantity:.8f}",
+            },
+        )
 
-    return RiskDecision(True, "Safe to trade")
-
-
-def calculate_exit_prices(entry_price: float, stop_loss_percent: float, take_profit_percent: float) -> tuple[float, float]:
-    stop_loss_price = entry_price * (1 - stop_loss_percent / 100.0)
-    take_profit_price = entry_price * (1 + take_profit_percent / 100.0)
-    return stop_loss_price, take_profit_price
+    async def cancel_open_orders(self, symbol: str) -> Any:
+        return await self._request("DELETE", "/api/v3/openOrders", signed=True, params={"symbol": symbol.upper()})

@@ -1,25 +1,16 @@
-from datetime import timedelta
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models.user import User
-from app.schemas import LoginRequest, TokenResponse
-from app.utils.security import create_access_token, get_current_user, verify_password
-from app.config import get_settings
-
-router = APIRouter(prefix="/api/auth", tags=["auth"])
-settings = get_settings()
+from datetime import datetime
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
+from app.database import Base
 
 
-@router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email, User.is_active == True).first()
-    if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_access_token(user.email, timedelta(minutes=settings.access_token_expire_minutes))
-    return TokenResponse(access_token=token)
+class User(Base):
+    __tablename__ = "users"
 
-
-@router.get("/me")
-def me(user: User = Depends(get_current_user)):
-    return {"id": user.id, "email": user.email, "role": user.role, "status": user.status}
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(50), default="admin", nullable=False)
+    status = Column(String(50), default="active", nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

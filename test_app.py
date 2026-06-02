@@ -1,47 +1,19 @@
-from datetime import datetime, timedelta
-from typing import Optional
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+import json
+from typing import Any, Optional
 from sqlalchemy.orm import Session
-from app.config import get_settings
-from app.database import get_db
-from app.models.user import User
-
-settings = get_settings()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+from app.models.trade_log import TradeLog
+from app.models.safety_event import SafetyEvent
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+def log_trade(db: Session, message: str, bot_id: Optional[int] = None, level: str = "INFO", data: Any = None):
+    row = TradeLog(bot_id=bot_id, level=level, message=message, data_json=json.dumps(data, default=str) if data is not None else None)
+    db.add(row)
+    db.commit()
+    return row
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def create_access_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
-    to_encode = {"sub": subject, "exp": expire}
-    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
-
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    user = db.query(User).filter(User.email == email, User.is_active == True).first()
-    if user is None:
-        raise credentials_exception
-    return user
+def log_safety_event(db: Session, event_type: str, reason: str, action_taken: str, bot_id: Optional[int] = None):
+    row = SafetyEvent(bot_id=bot_id, event_type=event_type, reason=reason, action_taken=action_taken)
+    db.add(row)
+    db.commit()
+    return row
